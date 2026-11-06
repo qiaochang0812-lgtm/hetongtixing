@@ -3,11 +3,10 @@ import {
   Bell,
   Check,
   Download,
-  Mic,
+  FileUp,
   ShieldCheck,
   Pencil,
   Upload,
-  Square,
   Trash2,
   X,
 } from "lucide-react";
@@ -25,9 +24,9 @@ import {
   type Draft,
   type Phase,
 } from "@/lib/contracts";
-import { Capacitor } from "@capacitor/core";
 import { exportBackup, syncReminders, type RemindState } from "@/lib/native";
-import { startNativeSpeech, stopNativeSpeech } from "@/lib/speech";
+import { parseContractDocument } from "@/lib/contract-doc";
+import { extractFileText } from "@/lib/file-text";
 
 const EXAMPLES = [
   "客户星河科技，年度维保合同，2025年11月5日签订，2026年12月5日到期",
@@ -35,30 +34,12 @@ const EXAMPLES = [
   "甲方临港物流，采购合同，2026年1月15日签署，明年1月14日到期",
 ];
 
-type SpeechCtor = new () => {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  start: () => void;
-  stop: () => void;
-  onresult: ((event: { resultIndex: number; results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null;
-  onerror: ((event: { error?: string }) => void) | null;
-  onend: (() => void) | null;
-};
-
 const PERMISSIONS = [
   { name: "通知", why: "到期前一个月、一周和到期当天弹出提醒。第一次保存合同时会询问。" },
   { name: "闹钟和提醒（精确定时）", why: "让提醒在早上 9 点准时弹出，而不是被系统延后。" },
   { name: "开机启动", why: "手机重启后自动恢复已设置的提醒，不然重启后提醒会丢。" },
-  { name: "麦克风", why: "点「语音输入」时用来听你说合同信息，用到时才会询问。" },
-  { name: "联网", why: "安卓应用默认声明的权限；本应用不联网上传数据，语音识别由系统自带服务完成。" },
+  { name: "联网", why: "安卓应用默认声明的权限；本应用不联网上传任何数据，合同文件只在手机本地读取。" },
 ];
-
-function speechCtor(): SpeechCtor | null {
-  if (typeof window === "undefined") return null;
-  const w = window as Window & { SpeechRecognition?: SpeechCtor; webkitSpeechRecognition?: SpeechCtor };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
-}
 
 function newId(): string {
   return crypto.randomUUID();
@@ -68,20 +49,20 @@ export function ContractApp() {
   const [rows, setRows] = useState<Contract[]>([]);
   const [ready, setReady] = useState(false);
   const [text, setText] = useState("");
-  const [listening, setListening] = useState(false);
-  const [speechNote, setSpeechNote] = useState("");
+  const [reading, setReading] = useState(false);
+  const [fileNote, setFileNote] = useState("");
+  const [readStatus, setReadStatus] = useState("");
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [source, setSource] = useState<"rules" | "manual" | null>(null);
+  const [source, setSource] = useState<"rules" | "file" | "manual" | null>(null);
   const [remind, setRemind] = useState<RemindState | null>(null);
   const askRef = useRef(false);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const [storageWarn, setStorageWarn] = useState(false);
   const [backupNote, setBackupNote] = useState("");
   const [showPerms, setShowPerms] = useState(false);
-  const recogRef = useRef<InstanceType<SpeechCtor> | null>(null);
-  const baseRef = useRef("");
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const importRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -100,12 +81,6 @@ export function ContractApp() {
     void syncReminders(rows, ask).then(setRemind);
   }, [rows, ready]);
 
-  useEffect(() => {
-    return () => {
-      recogRef.current?.stop();
-    };
-  }, []);
-
   const today = todayISO();
   const grouped = useMemo(() => {
     const isDue = (row: Contract) => phaseOf(row, today) === "due" && !row.acknowledged;
@@ -122,92 +97,37 @@ export function ContractApp() {
     return { due, rest };
   }, [rows, today]);
 
-  function stopListening() {
-    recogRef.current?.stop();
-    void stopNativeSpeech();
-    setListening(false);
-  }
-
-  async function startListening() {
+  async function uploadContract(file: File | undefined) {
+    if (!file) return;
     setError("");
-    setSpeechNote("");
-    if (Capacitor.isNativePlatform()) {
-      baseRef.current = text.trim();
-      const result = await startNativeSpeech(
-        (spoken) => {
-          if (!spoken) {
-            setSpeechNote("没听到内容。请靠近一点再说一次，或点输入法键盘上的话筒。");
-            return;
-          }
-          const base = baseRef.current;
-          setText(base ? `${base} ${spoken}` : spoken);
-        },
-        () => setListening(false),
-      );
-      if (result.ok) {
-        setListening(true);
-      } else {
-        setSpeechNote(result.reason);
-        textRef.current?.focus();
-      }
-      return;
-    }
-    const Ctor = speechCtor();
-    if (!Ctor) {
-      setSpeechNote("这个手机的应用内不能直接语音。请点输入法键盘上的话筒图标说话，效果一样。");
-      textRef.current?.focus();
-      return;
-    }
-    setError("");
-    setSpeechNote("");
-    const recog = new Ctor();
-    recog.lang = "zh-CN";
-    recog.continuous = true;
-    recog.interimResults = true;
-    baseRef.current = text.trim();
-    recog.onresult = (event) => {
-      let finalText = "";
-      let interim = "";
-      for (let i = 0; i < event.results.length; i += 1) {
-        const piece = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalText += piece;
-        else interim += piece;
-      }
-      const spoken = `${finalText}${interim}`.trim();
-      const base = baseRef.current;
-      setText(base ? `${base} ${spoken}` : spoken);
-    };
-    recog.onerror = (event) => {
-      setListening(false);
-      const code = event?.error;
-      if (code === "not-allowed" || code === "service-not-allowed") {
-        setSpeechNote("没有麦克风权限。请在浏览器设置里允许，或直接打字。");
-      } else if (code === "network") {
-        setSpeechNote("语音识别需要联网，现在连不上。可以直接打字。");
-      } else if (code === "aborted") {
-        // 主动停止，不提示
-      } else {
-        setSpeechNote("没听清。可以再说一次，或直接打字。");
-      }
-    };
-    recog.onend = () => setListening(false);
-    recogRef.current = recog;
+    setFileNote("");
+    setReadStatus("");
+    setReading(true);
     try {
-      recog.start();
-      setListening(true);
-    } catch {
-      setSpeechNote("语音暂时开不了，请直接输入。");
+      const text = await extractFileText(file, setReadStatus);
+      const { draft: parsed, found } = parseContractDocument(text);
+      if (found === 0) {
+        setFileNote("读到了文字，但没找到日期、金额等信息。请手动录入。");
+        return;
+      }
+      setDraft(parsed);
+      setSource("file");
+      setEditingId(null);
+    } catch (err) {
+      setFileNote(err instanceof Error && err.message ? err.message : "这份合同没能读取，请换一份或手动录入。");
+    } finally {
+      setReading(false);
+      setReadStatus("");
     }
   }
 
   function organizeText() {
     const spoken = text.trim();
     if (!spoken) {
-      setError("先说一句，或点下面的例句。");
+      setError("先输入一句合同信息，或点下面的示例。");
       return;
     }
     setError("");
-    stopListening();
     setDraft(parseContractText(spoken, today));
     setSource("rules");
     setEditingId(null);
@@ -316,7 +236,7 @@ export function ContractApp() {
       <header className="flex items-start justify-between gap-4">
         <div>
           <p className="font-serif text-3xl font-semibold tracking-tight text-ink">提醒</p>
-          <p className="mt-1 text-sm text-muted">说一句合同，自动整理。到期前一个月提醒你。</p>
+          <p className="mt-1 text-sm text-muted">上传合同或输入一句话，自动整理。到期前一个月提醒你。</p>
         </div>
         <div className="rounded-md bg-primary px-3 py-2 text-right text-primary-fg">
           <p className="text-xs opacity-80">待提醒</p>
@@ -338,13 +258,23 @@ export function ContractApp() {
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={listening ? stopListening : () => void startListening()}
-            className="relative inline-flex h-12 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-fg"
+            onClick={() => fileRef.current?.click()}
+            disabled={reading}
+            className="inline-flex h-12 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-fg disabled:opacity-60"
           >
-            {listening && <span className="listen-ring absolute inset-0 rounded-md border border-primary" />}
-            {listening ? <Square className="size-4" /> : <Mic className="size-4" />}
-            {listening ? "停止" : "语音输入"}
+            <FileUp className="size-4" />
+            {reading ? "正在读取…" : "上传合同"}
           </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,.docx,.txt,image/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            className="hidden"
+            onChange={(event) => {
+              void uploadContract(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
           <button
             type="button"
             onClick={organizeText}
@@ -353,10 +283,11 @@ export function ContractApp() {
             整理并录入
           </button>
         </div>
-        {speechNote && <p className="mt-2 text-sm text-muted">{speechNote}</p>}
+        {readStatus && <p className="mt-2 text-sm text-muted">{readStatus}</p>}
+        {fileNote && <p className="mt-2 text-sm text-danger">{fileNote}</p>}
         {error && !draft && <p className="mt-2 text-sm text-danger">{error}</p>}
         <div className="mt-4 flex flex-col gap-2">
-          <p className="text-xs text-muted">可以这样说</p>
+          <p className="text-xs text-muted">示例</p>
           {EXAMPLES.map((example) => (
             <button
               key={example}
@@ -519,7 +450,7 @@ export function ContractApp() {
               ))}
             </ul>
             <p className="mt-3 text-xs leading-5 text-muted">
-              不读取通讯录、短信、位置、相册和文件，也不会上传任何合同数据；合同只保存在这部手机里。
+              不读取通讯录、短信、位置和相册；只在你点「上传合同」时读取你选的那一份文件或图片，也不会上传任何合同数据，合同只保存在这部手机里。
             </p>
           </div>
         </div>
@@ -539,7 +470,7 @@ export function ContractApp() {
                   {editingId ? "修改合同" : "确认后录入"}
                 </h2>
                 <p className="mt-1 text-xs text-muted">
-                  {"已按语句整理，请核对日期。"}
+                  {source === "file" ? "已从合同文件提取，请核对日期、金额和备注。" : "已按语句整理，请核对日期。"}
                 </p>
               </div>
               <button type="button" aria-label="关闭" onClick={() => setDraft(null)} className="rounded-md p-2 text-muted">

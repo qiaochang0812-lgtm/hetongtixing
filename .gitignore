@@ -5,3 +5,5 @@ android
 .env.*
 *.log
 .DS_Store
+public/cmaps
+public/tesseract

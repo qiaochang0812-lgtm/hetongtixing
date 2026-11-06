@@ -284,7 +284,7 @@ function findAmount(text: string): string {
   return "";
 }
 
-function cnSmall(token: string): number | null {
+export function cnSmall(token: string): number | null {
   if (/^\d+$/.test(token)) return Number(token);
   const map: Record<string, number> = {
     一: 1,
