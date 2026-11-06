@@ -1,229 +1,148 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Bell,
-  Check,
-  Download,
-  FileUp,
-  ShieldCheck,
-  Pencil,
-  Upload,
-  Trash2,
-  X,
-} from "lucide-react";
-import {
-  formatCN,
-  isISODate,
-  loadContracts,
-  parseBackup,
-  parseContractText,
-  phaseOf,
-  reminderLabel,
-  saveContracts,
-  todayISO,
-  type Contract,
-  type Draft,
-  type Phase,
-} from "@/lib/contracts";
-import { exportBackup, syncReminders, type RemindState } from "@/lib/native";
+import { useMemo, useRef, useState } from "react";
+import { Bell, Download, FileUp, ShieldCheck, Upload } from "lucide-react";
+import { ContractCard } from "@/components/contract-card";
+import { DraftDialog, PermissionsDialog } from "@/components/dialogs";
+import { ProgressBar } from "@/components/progress-bar";
+import type { Progress } from "@/lib/async";
 import { parseContractDocument } from "@/lib/contract-doc";
+import { isISODate, parseBackup, parseContractText, phaseOf, todayISO, type Contract, type Draft } from "@/lib/contracts";
 import { extractFileText } from "@/lib/file-text";
+import { exportBackup } from "@/lib/native";
+import { closeOcr, warmOcr } from "@/lib/ocr";
+import { useContracts } from "@/lib/use-contracts";
 
 const EXAMPLES = [
   "客户星河科技，年度维保合同，2025年11月5日签订，2026年12月5日到期",
   "和南山咖啡签了租赁合同，今年3月1日生效，有效期两年，月租8000元",
-  "甲方临港物流，采购合同，2026年1月15日签署，明年1月14日到期",
 ];
 
-const PERMISSIONS = [
-  { name: "通知", why: "到期前一个月、一周和到期当天弹出提醒。第一次保存合同时会询问。" },
-  { name: "闹钟和提醒（精确定时）", why: "让提醒在早上 9 点准时弹出，而不是被系统延后。" },
-  { name: "开机启动", why: "手机重启后自动恢复已设置的提醒，不然重启后提醒会丢。" },
-  { name: "联网", why: "安卓应用默认声明的权限；本应用不联网上传任何数据，合同文件只在手机本地读取。" },
-];
+const SMALL_BUTTON = "inline-flex h-10 items-center justify-center gap-1 whitespace-nowrap rounded-md border border-line bg-surface px-2 text-sm";
 
-function newId(): string {
-  return crypto.randomUUID();
-}
+type Job = { percent: number; label: string; startedAt: number };
 
 export function ContractApp() {
-  const [rows, setRows] = useState<Contract[]>([]);
-  const [ready, setReady] = useState(false);
+  const { rows, ready, storageWarn, remind, add, patch, remove, merge, askPermission } = useContracts();
   const [text, setText] = useState("");
-  const [reading, setReading] = useState(false);
-  const [fileNote, setFileNote] = useState("");
-  const [readStatus, setReadStatus] = useState("");
-  const [error, setError] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [source, setSource] = useState<"rules" | "file" | "manual" | null>(null);
-  const [remind, setRemind] = useState<RemindState | null>(null);
-  const askRef = useRef(false);
-  const textRef = useRef<HTMLTextAreaElement | null>(null);
-  const [storageWarn, setStorageWarn] = useState(false);
+  const [error, setError] = useState("");
+  const [fileNote, setFileNote] = useState("");
   const [backupNote, setBackupNote] = useState("");
   const [showPerms, setShowPerms] = useState(false);
+  const [job, setJob] = useState<Job | null>(null);
+  const runRef = useRef(0);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const importRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    setRows(loadContracts());
-    setReady(true);
-  }, []);
-
-  useEffect(() => {
-    if (ready) setStorageWarn(!saveContracts(rows));
-  }, [rows, ready]);
-
-  useEffect(() => {
-    if (!ready) return;
-    const ask = askRef.current;
-    askRef.current = false;
-    void syncReminders(rows, ask).then(setRemind);
-  }, [rows, ready]);
-
   const today = todayISO();
-  const grouped = useMemo(() => {
+  const { due, rest } = useMemo(() => {
     const isDue = (row: Contract) => phaseOf(row, today) === "due" && !row.acknowledged;
-    const due = rows.filter(isDue).sort((a, b) => a.expiresOn.localeCompare(b.expiresOn));
-    // “全部合同”里不再重复显示上面已经出现的；已过期的沉到最后，最近过期的在前
     const rank = (row: Contract) => (phaseOf(row, today) === "expired" ? 1 : 0);
-    const rest = rows
-      .filter((row) => !isDue(row))
-      .sort((a, b) => {
-        const diff = rank(a) - rank(b);
-        if (diff) return diff;
-        return rank(a) ? b.expiresOn.localeCompare(a.expiresOn) : a.expiresOn.localeCompare(b.expiresOn);
-      });
-    return { due, rest };
+    return {
+      due: rows.filter(isDue).sort((a, b) => a.expiresOn.localeCompare(b.expiresOn)),
+      // 已过期的沉到最后，最近过期的在前；其余按到期先后
+      rest: rows
+        .filter((row) => !isDue(row))
+        .sort((a, b) => rank(a) - rank(b) || (rank(a) ? b.expiresOn.localeCompare(a.expiresOn) : a.expiresOn.localeCompare(b.expiresOn))),
+    };
   }, [rows, today]);
+
+  function openUpload() {
+    warmOcr();
+    fileRef.current?.click();
+  }
 
   async function uploadContract(file: File | undefined) {
     if (!file) return;
+    const run = ++runRef.current;
+    const live = () => runRef.current === run;
     setError("");
     setFileNote("");
-    setReadStatus("");
-    setReading(true);
+    setJob({ percent: 2, label: "正在读取文件…", startedAt: Date.now() });
+    const progress: Progress = (percent, label) => {
+      if (!live()) return;
+      setJob((current) => (current ? { ...current, percent: Math.max(current.percent, Math.min(99, percent)), label } : current));
+    };
     try {
-      const text = await extractFileText(file, setReadStatus);
-      const { draft: parsed, found } = parseContractDocument(text);
+      const { draft: parsed, found } = parseContractDocument(await extractFileText(file, progress));
+      if (!live()) return;
       if (found === 0) {
-        setFileNote("读到了文字，但没找到日期、金额等信息。请手动录入。");
+        setFileNote("读到了文字，但没找到日期、金额等信息，请手动录入。");
         return;
       }
       setDraft(parsed);
-      setSource("file");
       setEditingId(null);
     } catch (err) {
-      setFileNote(err instanceof Error && err.message ? err.message : "这份合同没能读取，请换一份或手动录入。");
+      if (live()) setFileNote(err instanceof Error && err.message ? err.message : "这份合同没能读取，请换一份或手动录入。");
     } finally {
-      setReading(false);
-      setReadStatus("");
+      if (live()) setJob(null);
     }
   }
 
+  function cancelUpload() {
+    runRef.current += 1;
+    setJob(null);
+    closeOcr();
+  }
+
   function organizeText() {
-    const spoken = text.trim();
-    if (!spoken) {
+    const input = text.trim();
+    if (!input) {
       setError("先输入一句合同信息，或点下面的示例。");
       return;
     }
     setError("");
-    setDraft(parseContractText(spoken, today));
-    setSource("rules");
+    setDraft(parseContractText(input, today));
     setEditingId(null);
   }
 
   function openEdit(row: Contract) {
     setEditingId(row.id);
-    setSource("manual");
-    setDraft({
-      customer: row.customer,
-      title: row.title,
-      signedOn: row.signedOn,
-      expiresOn: row.expiresOn,
-      amount: row.amount,
-      notes: row.notes,
-      raw: row.raw,
-    });
     setError("");
+    setDraft({ customer: row.customer, title: row.title, signedOn: row.signedOn, expiresOn: row.expiresOn, amount: row.amount, notes: row.notes, raw: row.raw });
   }
 
-  function saveDraft() {
-    if (!draft) return;
-    if (!draft.customer.trim()) {
-      setError("还缺客户名称。");
-      return;
-    }
-    if (!isISODate(draft.signedOn) || !isISODate(draft.expiresOn)) {
-      setError("签订日期和到期日期都要填完整。");
-      return;
-    }
-    if (draft.expiresOn < draft.signedOn) {
-      setError("到期日不能早于签订日。");
-      return;
-    }
-    const title = draft.title.trim() || `${draft.customer.trim()}合同`;
-    if (editingId) {
-      setRows((current) =>
-        current.map((row) =>
-          row.id === editingId
-            ? {
-                ...row,
-                // 改了到期日，之前的“已阅”就作废，重新进入提醒
-                acknowledged: row.expiresOn === draft.expiresOn ? row.acknowledged : false,
-                customer: draft.customer.trim(),
-                title,
-                signedOn: draft.signedOn,
-                expiresOn: draft.expiresOn,
-                amount: draft.amount.trim(),
-                notes: draft.notes.trim(),
-                raw: draft.raw,
-              }
-            : row,
-        ),
-      );
-    } else {
-      const row: Contract = {
-        id: newId(),
-        customer: draft.customer.trim(),
-        title,
-        signedOn: draft.signedOn,
-        expiresOn: draft.expiresOn,
-        amount: draft.amount.trim(),
-        notes: draft.notes.trim(),
-        raw: draft.raw,
-        acknowledged: false,
-        createdAt: new Date().toISOString(),
-      };
-      askRef.current = true;
-      setRows((current) => [row, ...current]);
-      setText("");
-    }
+  function closeDraft() {
     setDraft(null);
     setEditingId(null);
     setError("");
   }
 
+  function saveDraft() {
+    if (!draft) return;
+    const customer = draft.customer.trim();
+    if (!customer) return setError("还缺客户名称。");
+    if (!isISODate(draft.signedOn) || !isISODate(draft.expiresOn)) return setError("签订日期和到期日期都要填完整。");
+    if (draft.expiresOn < draft.signedOn) return setError("到期日不能早于签订日。");
+    const fields = {
+      customer,
+      title: draft.title.trim() || `${customer}合同`,
+      signedOn: draft.signedOn,
+      expiresOn: draft.expiresOn,
+      amount: draft.amount.trim(),
+      notes: draft.notes.trim(),
+      raw: draft.raw,
+    };
+    if (editingId) {
+      // 改了到期日，之前的“已阅”就作废，重新进入提醒
+      patch(editingId, (row) => ({ ...row, ...fields, acknowledged: row.expiresOn === fields.expiresOn ? row.acknowledged : false }));
+    } else {
+      add({ id: crypto.randomUUID(), ...fields, acknowledged: false, createdAt: new Date().toISOString() });
+      setText("");
+    }
+    closeDraft();
+  }
+
   function removeRow(row: Contract) {
-    if (!window.confirm(`确定删除「${row.customer} · ${row.title}」吗？删除后无法恢复。`)) return;
-    setRows((current) => current.filter((item) => item.id !== row.id));
+    if (window.confirm(`确定删除「${row.customer} · ${row.title}」吗？删除后无法恢复。`)) remove(row.id);
   }
 
   async function importBackup(file: File | undefined) {
     if (!file) return;
     const imported = parseBackup(await file.text());
-    if (!imported) {
-      setBackupNote("这个文件不是本应用的备份，没有导入。");
-      return;
-    }
-    const known = new Set(rows.map((row) => row.id));
-    const fresh = imported.filter((row) => !known.has(row.id));
-    setRows((current) => [...fresh, ...current]);
-    setBackupNote(`已导入 ${fresh.length} 份合同${imported.length > fresh.length ? `，${imported.length - fresh.length} 份已存在，已跳过` : ""}。`);
-  }
-
-  async function enableNotify() {
-    setRemind(await syncReminders(rows, true));
+    if (!imported) return setBackupNote("这个文件不是本应用的备份，没有导入。");
+    const { added, skipped } = merge(imported);
+    setBackupNote(`已导入 ${added} 份合同${skipped ? `，${skipped} 份已存在，已跳过` : ""}。`);
   }
 
   async function doExport() {
@@ -231,63 +150,74 @@ export function ContractApp() {
     if (note) setBackupNote(note);
   }
 
+  const cards = (list: Contract[]) => (
+    <ul className="mt-3 flex flex-col gap-3">
+      {list.map((row) => (
+        <li key={row.id}>
+          <ContractCard
+            row={row}
+            today={today}
+            onEdit={() => openEdit(row)}
+            onDelete={() => removeRow(row)}
+            onAck={() => patch(row.id, (item) => ({ ...item, acknowledged: true }))}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+
   return (
-    <main className="mx-auto min-h-dvh w-full max-w-3xl px-4 pb-16 pt-6 sm:px-6">
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <p className="font-serif text-3xl font-semibold tracking-tight text-ink">提醒</p>
-          <p className="mt-1 text-sm text-muted">上传合同或输入一句话，自动整理。到期前一个月提醒你。</p>
-        </div>
-        <div className="rounded-md bg-primary px-3 py-2 text-right text-primary-fg">
+    <main className="mx-auto min-h-dvh w-full max-w-3xl px-4 pb-16 pt-[max(1.25rem,env(safe-area-inset-top))] sm:px-6">
+      <header className="flex items-center justify-between gap-3">
+        <h1 className="min-w-0 font-serif text-3xl font-semibold tracking-tight text-ink">提醒</h1>
+        <div className="shrink-0 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-center text-primary-fg">
           <p className="text-xs opacity-80">待提醒</p>
-          <p className="font-serif text-2xl leading-none">{grouped.due.length}</p>
+          <p className="font-serif text-2xl leading-tight">{due.length}</p>
         </div>
       </header>
 
-      <section className="mt-6 rounded-lg border border-line bg-surface p-4 shadow-sm sm:p-5">
+      <section className="mt-5 rounded-lg border border-line bg-surface p-4 shadow-sm">
         <textarea
-          id="utterance"
           aria-label="合同信息"
-          ref={textRef}
           value={text}
           onChange={(event) => setText(event.target.value)}
-          rows={4}
+          rows={3}
           placeholder="例如：客户星河科技，年度维保合同，2025年11月5日签订，2026年12月5日到期"
-          className="mt-2 w-full resize-none rounded-md border border-line bg-bg px-3 py-3 text-base text-ink outline-none placeholder:text-muted focus:border-primary"
+          className="w-full resize-none rounded-md border border-line bg-bg px-3 py-3 text-base text-ink outline-none placeholder:text-muted focus:border-primary"
         />
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-3 grid grid-cols-2 gap-2">
           <button
             type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={reading}
-            className="inline-flex h-12 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-fg disabled:opacity-60"
+            onClick={openUpload}
+            disabled={job !== null}
+            className="inline-flex h-12 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-3 text-sm font-medium text-primary-fg disabled:opacity-60"
           >
             <FileUp className="size-4" />
-            {reading ? "正在读取…" : "上传合同"}
+            上传合同
           </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf,.docx,.txt,image/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
-            className="hidden"
-            onChange={(event) => {
-              void uploadContract(event.target.files?.[0]);
-              event.target.value = "";
-            }}
-          />
           <button
             type="button"
             onClick={organizeText}
-            className="inline-flex h-12 items-center rounded-md border border-primary px-4 text-sm font-medium text-primary"
+            disabled={job !== null}
+            className="inline-flex h-12 items-center justify-center whitespace-nowrap rounded-md border border-primary px-3 text-sm font-medium text-primary disabled:opacity-60"
           >
             整理并录入
           </button>
         </div>
-        {readStatus && <p className="mt-2 text-sm text-muted">{readStatus}</p>}
-        {fileNote && <p className="mt-2 text-sm text-danger">{fileNote}</p>}
-        {error && !draft && <p className="mt-2 text-sm text-danger">{error}</p>}
-        <div className="mt-4 flex flex-col gap-2">
-          <p className="text-xs text-muted">示例</p>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".pdf,.docx,.txt,image/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+          className="hidden"
+          onChange={(event) => {
+            void uploadContract(event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+        {job && <ProgressBar percent={job.percent} label={job.label} startedAt={job.startedAt} onCancel={cancelUpload} />}
+        {fileNote && <p className="mt-3 text-sm leading-6 text-danger">{fileNote}</p>}
+        {error && !draft && <p className="mt-3 text-sm text-danger">{error}</p>}
+        <div className="mt-3 flex flex-col gap-2">
           {EXAMPLES.map((example) => (
             <button
               key={example}
@@ -296,7 +226,7 @@ export function ContractApp() {
                 setText(example);
                 setError("");
               }}
-              className="rounded-md bg-chip px-3 py-2 text-left text-sm text-ink"
+              className="rounded-md bg-chip px-3 py-2 text-left text-xs leading-5 text-ink"
             >
               {example}
             </button>
@@ -307,105 +237,50 @@ export function ContractApp() {
       {remind === "denied" && (
         <button
           type="button"
-          onClick={() => void enableNotify()}
+          onClick={() => void askPermission()}
           className="mt-4 flex w-full items-center gap-3 rounded-lg border border-warn bg-warn-bg px-4 py-3 text-left text-sm"
         >
-          <Bell className="size-4 text-warn" />
+          <Bell className="size-4 shrink-0 text-warn" />
           <span>还没有通知权限，到期提醒不会弹出。点此开启；若没有弹窗，请到手机 设置 → 通知 → 提醒 里打开。</span>
         </button>
       )}
       {remind === "error" && (
-        <p className="mt-4 rounded-lg border border-warn bg-warn-bg px-4 py-3 text-sm text-warn">
-          提醒没能设置成功，请重新打开应用再试。
-        </p>
+        <p className="mt-4 rounded-lg border border-warn bg-warn-bg px-4 py-3 text-sm text-warn">提醒没能设置成功，请重新打开应用再试。</p>
       )}
 
-      <section className="mt-8">
+      <section className="mt-7">
         <h2 className="font-serif text-xl text-ink">该提醒了</h2>
-        <p className="mt-1 text-sm text-muted">到期日前一个月起会出现在这里。</p>
-        {grouped.due.length === 0 ? (
-          <p className="mt-3 rounded-lg border border-dashed border-line px-4 py-6 text-sm text-muted">
-            现在没有进入提醒期的合同。
-          </p>
-        ) : (
-          <ul className="mt-3 flex flex-col gap-3">
-            {grouped.due.map((row) => (
-              <li key={row.id}>
-                <ContractCard
-                  row={row}
-                  today={today}
-                  emphasized
-                  onEdit={() => openEdit(row)}
-                  onDelete={() => removeRow(row)}
-                  onAck={() =>
-                    setRows((current) => current.map((item) => (item.id === row.id ? { ...item, acknowledged: true } : item)))
-                  }
-                />
-              </li>
-            ))}
-          </ul>
-        )}
+        {due.length === 0 ? <p className="mt-3 rounded-lg border border-dashed border-line px-4 py-5 text-sm text-muted">暂无</p> : cards(due)}
       </section>
 
-      <section className="mt-8">
+      <section className="mt-7">
         <h2 className="font-serif text-xl text-ink">其他合同</h2>
         {!ready ? (
           <p className="mt-3 text-sm text-muted">正在读取…</p>
-        ) : grouped.rest.length === 0 ? (
-          <p className="mt-3 rounded-lg border border-dashed border-line px-4 py-8 text-sm leading-6 text-muted">
-            {rows.length === 0
-              ? "还没有合同。说完点「整理并录入」，确认日期后就会记在这台设备上。"
-              : "没有其他合同了。"}
-          </p>
+        ) : rest.length === 0 ? (
+          <p className="mt-3 rounded-lg border border-dashed border-line px-4 py-5 text-sm text-muted">暂无</p>
         ) : (
-          <ul className="mt-3 flex flex-col gap-3">
-            {grouped.rest.map((row) => (
-              <li key={row.id}>
-                <ContractCard
-                  row={row}
-                  today={today}
-                  onEdit={() => openEdit(row)}
-                  onDelete={() => removeRow(row)}
-                  onAck={() =>
-                    setRows((current) => current.map((item) => (item.id === row.id ? { ...item, acknowledged: true } : item)))
-                  }
-                />
-              </li>
-            ))}
-          </ul>
+          cards(rest)
         )}
       </section>
 
       {storageWarn && (
         <p className="mt-6 rounded-lg border border-danger bg-danger-bg px-4 py-3 text-sm text-danger">
-          这台设备的浏览器没能保存数据（可能是无痕模式或空间已满），关闭页面后合同会丢失。请先点下面的「导出备份」。
+          没能保存数据（可能是存储空间已满），退出后合同会丢失。请先点下面的「导出备份」。
         </p>
       )}
 
-      <div className="mt-8 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void doExport()}
-          disabled={rows.length === 0}
-          className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm disabled:opacity-50"
-        >
-          <Download className="size-4" />
+      <div className="mt-8 grid grid-cols-3 gap-2">
+        <button type="button" onClick={() => void doExport()} disabled={rows.length === 0} className={`${SMALL_BUTTON} disabled:opacity-50`}>
+          <Download className="size-4 shrink-0" />
           导出备份
         </button>
-        <button
-          type="button"
-          onClick={() => importRef.current?.click()}
-          className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm"
-        >
-          <Upload className="size-4" />
+        <button type="button" onClick={() => importRef.current?.click()} className={SMALL_BUTTON}>
+          <Upload className="size-4 shrink-0" />
           导入备份
         </button>
-        <button
-          type="button"
-          onClick={() => setShowPerms(true)}
-          className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm"
-        >
-          <ShieldCheck className="size-4" />
+        <button type="button" onClick={() => setShowPerms(true)} className={SMALL_BUTTON}>
+          <ShieldCheck className="size-4 shrink-0" />
           权限说明
         </button>
         <input
@@ -418,178 +293,12 @@ export function ContractApp() {
             event.target.value = "";
           }}
         />
-        {backupNote && <p className="w-full text-sm text-muted">{backupNote}</p>}
       </div>
+      {backupNote && <p className="mt-3 text-sm text-muted">{backupNote}</p>}
+      <p className="mt-4 text-xs leading-5 text-muted">合同只存在这部手机里，卸载应用或清除数据会丢，建议隔一阵导出一次备份。</p>
 
-      <p className="mt-4 text-xs leading-5 text-muted">
-        合同只存在这台手机的应用里，卸载应用或清除数据会丢，建议隔一阵导出一次备份。每份合同会在到期前一个月、一周和到期当天早上 9 点用系统通知提醒，应用不用打开。
-      </p>
-
-      {showPerms && (
-        <div className="fixed inset-0 z-20 flex items-end justify-center bg-ink/40 p-3 sm:items-center" role="presentation">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="perms-title"
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg bg-surface p-4 shadow-lg sm:p-5"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <h2 id="perms-title" className="font-serif text-xl">
-                本应用用到的权限
-              </h2>
-              <button type="button" aria-label="关闭" onClick={() => setShowPerms(false)} className="rounded-md p-2 text-muted">
-                <X className="size-5" />
-              </button>
-            </div>
-            <ul className="mt-3 divide-y divide-line text-sm">
-              {PERMISSIONS.map((item) => (
-                <li key={item.name} className="py-3">
-                  <p className="font-medium text-ink">{item.name}</p>
-                  <p className="mt-1 text-xs leading-5 text-muted">{item.why}</p>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-3 text-xs leading-5 text-muted">
-              不读取通讯录、短信、位置和相册；只在你点「上传合同」时读取你选的那一份文件或图片，也不会上传任何合同数据，合同只保存在这部手机里。
-            </p>
-          </div>
-        </div>
-      )}
-
-      {draft && (
-        <div className="fixed inset-0 z-20 flex items-end justify-center bg-ink/40 p-3 sm:items-center" role="presentation">
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="draft-title"
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg bg-surface p-4 shadow-lg sm:p-5"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 id="draft-title" className="font-serif text-xl">
-                  {editingId ? "修改合同" : "确认后录入"}
-                </h2>
-                <p className="mt-1 text-xs text-muted">
-                  {source === "file" ? "已从合同文件提取，请核对日期、金额和备注。" : "已按语句整理，请核对日期。"}
-                </p>
-              </div>
-              <button type="button" aria-label="关闭" onClick={() => setDraft(null)} className="rounded-md p-2 text-muted">
-                <X className="size-5" />
-              </button>
-            </div>
-            <div className="mt-4 grid gap-3">
-              <Field label="客户" value={draft.customer} onChange={(customer) => setDraft({ ...draft, customer })} />
-              <Field label="合同名称" value={draft.title} onChange={(title) => setDraft({ ...draft, title })} />
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="签订日期" type="date" value={draft.signedOn} onChange={(signedOn) => setDraft({ ...draft, signedOn })} />
-                <Field label="到期日期" type="date" value={draft.expiresOn} onChange={(expiresOn) => setDraft({ ...draft, expiresOn })} />
-              </div>
-              <Field label="金额（可选）" value={draft.amount} onChange={(amount) => setDraft({ ...draft, amount })} />
-              <label className="grid gap-1 text-sm">
-                <span className="text-muted">备注（可选）</span>
-                <textarea
-                  value={draft.notes}
-                  onChange={(event) => setDraft({ ...draft, notes: event.target.value })}
-                  rows={2}
-                  className="rounded-md border border-line bg-bg px-3 py-2 text-base text-ink outline-none focus:border-primary"
-                />
-              </label>
-            </div>
-            {error && <p className="mt-3 text-sm text-danger">{error}</p>}
-            <div className="mt-4 flex gap-2">
-              <button type="button" onClick={saveDraft} className="inline-flex h-12 flex-1 items-center justify-center rounded-md bg-primary text-sm font-medium text-primary-fg">
-                保存
-              </button>
-              <button type="button" onClick={() => setDraft(null)} className="inline-flex h-12 items-center justify-center rounded-md border border-line px-4 text-sm">
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showPerms && <PermissionsDialog onClose={() => setShowPerms(false)} />}
+      {draft && <DraftDialog draft={draft} editing={editingId !== null} error={error} onChange={setDraft} onSave={saveDraft} onClose={closeDraft} />}
     </main>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  type = "text",
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  type?: string;
-}) {
-  return (
-    <label className="grid gap-1 text-sm">
-      <span className="text-muted">{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-11 rounded-md border border-line bg-bg px-3 text-base text-ink outline-none focus:border-primary"
-      />
-    </label>
-  );
-}
-
-function ContractCard({
-  row,
-  today,
-  emphasized = false,
-  onEdit,
-  onDelete,
-  onAck,
-}: {
-  row: Contract;
-  today: string;
-  emphasized?: boolean;
-  onEdit: () => void;
-  onDelete: () => void;
-  onAck: () => void;
-}) {
-  const phase: Phase = phaseOf(row, today);
-  const tone =
-    phase === "expired"
-      ? "border-danger bg-danger-bg"
-      : phase === "due" && !row.acknowledged
-        ? "border-warn bg-warn-bg"
-        : "border-line bg-surface";
-  const badge =
-    phase === "expired" ? "text-danger" : phase === "due" && !row.acknowledged ? "text-warn" : "text-ok";
-
-  return (
-    <article className={`rounded-lg border px-4 py-3 ${tone} ${emphasized ? "shadow-sm" : ""}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-base font-semibold text-ink">{row.customer}</h3>
-          <p className="text-sm text-muted">{row.title}</p>
-        </div>
-        <p className={`text-right text-sm font-medium ${badge}`}>{reminderLabel(row, today)}</p>
-      </div>
-      <p className="mt-2 text-sm text-ink">
-        签订 {formatCN(row.signedOn)} · 到期 {formatCN(row.expiresOn)}
-        {row.amount ? ` · ${row.amount}` : ""}
-      </p>
-      {row.notes && <p className="mt-1 text-sm text-muted">{row.notes}</p>}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {phase === "due" && !row.acknowledged && (
-          <button type="button" onClick={onAck} className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm">
-            <Check className="size-4" />
-            已阅
-          </button>
-        )}
-        <button type="button" onClick={onEdit} className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm">
-          <Pencil className="size-4" />
-          修改
-        </button>
-        <button type="button" onClick={onDelete} className="inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm text-danger">
-          <Trash2 className="size-4" />
-          删除
-        </button>
-      </div>
-    </article>
   );
 }

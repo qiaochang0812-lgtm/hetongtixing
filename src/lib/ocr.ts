@@ -1,56 +1,116 @@
 import { createWorker, type Worker } from "tesseract.js";
+import { withTimeout } from "@/lib/async";
 
-function abs(path: string): string {
-  return new URL(path, document.baseURI).href;
-}
+/** fraction：0～1，整个 OCR 过程（含冷启动）的进度。 */
+export type OcrReport = (fraction: number, label: string) => void;
 
-export type OcrSession = {
-  recognize: (canvas: HTMLCanvasElement) => Promise<string>;
-  close: () => Promise<void>;
+const IDLE_MS = 120_000;
+let engine: Promise<Worker> | null = null;
+let report: OcrReport | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+const abs = (path: string): string => new URL(path, document.baseURI).href;
+
+const STAGES: Record<string, [number, number, string]> = {
+  "loading tesseract core": [0, 0.15, "正在加载识别引擎…"],
+  "initializing tesseract": [0.15, 0.2, "正在初始化识别引擎…"],
+  "loading language traineddata": [0.2, 0.35, "正在加载中文识别模型…"],
+  "initializing api": [0.35, 0.4, "正在初始化识别引擎…"],
+  "recognizing text": [0.4, 1, "正在识别文字…"],
 };
 
-/** 离线中文识别：引擎、模型都打包在应用里（见 scripts/copy-ocr-assets.mjs），不联网。 */
-export async function openOcr(): Promise<OcrSession> {
-  const worker: Worker = await createWorker("chi_sim", 1, {
-    workerPath: abs("tesseract/worker.min.js"),
-    corePath: abs("tesseract/core"),
-    langPath: abs("tesseract/lang"),
-    workerBlobURL: false,
-    cacheMethod: "none",
-    gzip: true,
-  });
-  return {
-    recognize: async (canvas) => {
-      const { data } = await worker.recognize(canvas);
-      return data.text ?? "";
-    },
-    close: async () => {
-      try {
-        await worker.terminate();
-      } catch {
-        // ignore
-      }
-    },
-  };
+async function check(path: string, what: string): Promise<boolean> {
+  try {
+    const res = await withTimeout(fetch(abs(path)), 10_000, `${what}读取超时`);
+    const type = res.headers.get("content-type") ?? "";
+    void res.body?.cancel();
+    return res.ok && !type.includes("text/html");
+  } catch {
+    return false;
+  }
 }
 
-/** 照片通常有几千万像素，缩到长边 2200 以内，识别更快也不容易内存溢出。 */
-export async function imageToCanvas(file: Blob, maxEdge = 2200): Promise<HTMLCanvasElement> {
-  let bitmap: ImageBitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    throw new Error("这种图片格式读不了，请换成 JPG 或 PNG。");
+/** 先确认打包进应用的识别组件都在，缺了就直接说缺什么，不让 worker 无声卡死。 */
+async function preflight(): Promise<void> {
+  if (!(await check("tesseract/worker.min.js", "识别引擎"))) {
+    throw new Error("应用里缺少识别引擎文件（tesseract/worker.min.js），请重新构建应用。");
   }
-  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("图片处理失败，请重试。");
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  return canvas;
+  const core =
+    (await check("tesseract/core/tesseract-core-simd-lstm.wasm.js", "识别核心")) ||
+    (await check("tesseract/core/tesseract-core-lstm.wasm.js", "识别核心"));
+  if (!core) throw new Error("应用里缺少识别核心文件（tesseract/core），请重新构建应用。");
+  if (!(await check("tesseract/lang/chi_sim.traineddata.gz", "中文模型"))) {
+    throw new Error("应用里缺少中文识别模型（tesseract/lang），请重新构建应用。");
+  }
+}
+
+async function startEngine(): Promise<Worker> {
+  await preflight();
+  const worker = await withTimeout(
+    createWorker("chi_sim", 1, {
+      workerPath: abs("tesseract/worker.min.js"),
+      corePath: abs("tesseract/core"),
+      langPath: abs("tesseract/lang"),
+      workerBlobURL: false,
+      cacheMethod: "none",
+      gzip: true,
+      logger: (message: { status: string; progress: number }) => {
+        const stage = STAGES[message.status];
+        if (stage && report) report(stage[0] + (stage[1] - stage[0]) * (message.progress || 0), stage[2]);
+      },
+    }),
+    60_000,
+    "识别引擎启动超时（60 秒）。手机内存不足时会这样，请关闭其他应用后重试。",
+  );
+  try {
+    await worker.setParameters({ tessedit_do_invert: "0", user_defined_dpi: "150" });
+  } catch {
+    // 参数只是加速用，失败不影响识别
+  }
+  return worker;
+}
+
+function getEngine(): Promise<Worker> {
+  if (!engine) {
+    engine = startEngine().catch((error) => {
+      engine = null;
+      throw error;
+    });
+  }
+  return engine;
+}
+
+export function closeOcr(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  const current = engine;
+  engine = null;
+  void current?.then((worker) => worker.terminate()).catch(() => undefined);
+}
+
+/** 点“上传合同”时就先启动引擎，用户选文件的这几秒里它已经在加载了。 */
+export function warmOcr(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  void getEngine().catch(() => undefined);
+  idleTimer = setTimeout(closeOcr, IDLE_MS);
+}
+
+export async function recognizeCanvas(canvas: HTMLCanvasElement, onReport: OcrReport): Promise<string> {
+  report = onReport;
+  if (idleTimer) clearTimeout(idleTimer);
+  try {
+    const worker = await getEngine();
+    onReport(0.4, "正在识别文字…");
+    const { data } = await withTimeout(
+      worker.recognize(canvas),
+      150_000,
+      "识别超时（超过 2 分半钟），请换一张更清晰的图片再试。",
+    ).catch((error) => {
+      closeOcr();
+      throw error;
+    });
+    return data.text ?? "";
+  } finally {
+    report = null;
+    idleTimer = setTimeout(closeOcr, IDLE_MS);
+  }
 }

@@ -33,11 +33,16 @@
   html {
     background: var(--color-bg);
     color: var(--color-ink);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    /* 随屏幕宽度微调基准字号，小屏手机不挤、大屏不空 */
+    font-size: clamp(15px, 1.2vw + 12.5px, 17px);
   }
 
   body {
     margin: 0;
-    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-wrap: break-word;
     font-family: var(--font-sans);
     background:
       radial-gradient(1200px 480px at 50% -10%, #efe6d4 0%, transparent 70%),
@@ -47,25 +52,4 @@
   ::selection {
     background: #d7eadf;
   }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .listen-ring {
-    animation: none !important;
-  }
-}
-
-@keyframes listen {
-  0% {
-    transform: scale(1);
-    opacity: 0.55;
-  }
-  100% {
-    transform: scale(1.45);
-    opacity: 0;
-  }
-}
-
-.listen-ring {
-  animation: listen 1.4s ease-out infinite;
 }
