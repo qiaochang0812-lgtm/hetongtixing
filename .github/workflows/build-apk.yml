@@ -62,9 +62,9 @@ jobs:
         run: |
           ls -la public/tesseract public/tesseract/core public/tesseract/lang || true
           test -s public/tesseract/worker.min.js || { echo "缺少识别引擎 worker.min.js"; exit 1; }
-          test -s public/tesseract/lang/chi_sim.traineddata.gz || { echo "缺少中文识别模型"; exit 1; }
+          test -s public/tesseract/lang/chi_sim.traineddata || { echo "缺少中文识别模型"; exit 1; }
           ls public/tesseract/core/*lstm* >/dev/null 2>&1 || { echo "缺少识别核心文件"; exit 1; }
-          test -s dist/tesseract/lang/chi_sim.traineddata.gz || { echo "识别模型没有进入构建产物 dist"; exit 1; }
+          test -s dist/tesseract/lang/chi_sim.traineddata || { echo "识别模型没有进入构建产物 dist"; exit 1; }
 
       - name: Create Android project
         run: |
