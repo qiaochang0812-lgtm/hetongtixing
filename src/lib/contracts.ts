@@ -329,6 +329,46 @@ function durationShift(text: string): number | null {
   return null;
 }
 
+const LEAD_FILLER = /^(?:备注|说明|到期|届满|截止|生效|有效期|签订了?|签署了?|签约了?|签了|合同|另外|还有|并且|然后|就|和|跟|给|的|了|是|为|在|于|从|到|至|起|止)[:：]?/;
+const TAIL_FILLER = /(?:的|了|起|止|生效|到期|届满|截止|合同)$/;
+
+function stripFiller(clause: string): string {
+  let out = clause.trim().replace(/^[\s:：、.\-]+|[\s:：、.\-]+$/g, "");
+  for (let i = 0; i < 8; i += 1) {
+    const next = out.replace(LEAD_FILLER, "").replace(TAIL_FILLER, "").trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+/** 日期、金额、客户、合同名称这些已经识别出来的内容拿掉后，剩下的话原样放进备注。 */
+function buildNotes(raw: string, hits: DateHit[], customer: string): string {
+  let rest = raw;
+  for (const hit of [...hits].sort((a, b) => b.index - a.index)) {
+    rest = `${rest.slice(0, hit.index)} ${rest.slice(hit.index + hit.length)}`;
+  }
+  const num = "(?:\\d+|[一两二三四五六七八九十])";
+  rest = rest
+    .replace(new RegExp(`(?:有效期|为期|期限|一共|共)?\\s*${num}\\s*(?:个月|年)\\s*(?:后|期)?`, "g"), " ")
+    .replace(/半年\s*(?:后|期)?/g, " ")
+    .replace(/(?:合同金额|合同总额|金额|总价|价款)?\s*[是为:：]?\s*\d+(?:\.\d+)?\s*万?\s*元/g, " ")
+    .replace(/《[^》]*》/g, " ")
+    .replace(/(?:合同名称|合同叫|合同是|这份是|签的是)\s*[:：]?\s*[^，,。；;\s]{2,24}/g, " ")
+    .replace(/(?:年度维保|维保|租赁|采购|服务|销售|劳务|框架|保密|代理|供货|施工)合同/g, " ");
+  if (customer) {
+    rest = rest
+      .replace(new RegExp(`(?:客户|甲方|对方)(?:名称|公司|名叫|叫做|是|为|叫)?\\s*[:：]?\\s*${customer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"), " ")
+      .split(customer)
+      .join(" ");
+  }
+  const parts = rest
+    .split(/[，,。；;、\s]+/)
+    .map(stripFiller)
+    .filter((part) => part.length >= 2);
+  return parts.join("；");
+}
+
 export function parseContractText(text: string, today = todayISO()): Draft {
   const raw = text.trim();
   const draft = emptyDraft(raw);
@@ -376,5 +416,6 @@ export function parseContractText(text: string, today = todayISO()): Draft {
   draft.signedOn = signed;
   draft.expiresOn = expires;
   if (!draft.title && draft.customer) draft.title = `${draft.customer}合同`;
+  draft.notes = buildNotes(raw, hits, draft.customer);
   return draft;
 }

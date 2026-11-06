@@ -18,7 +18,10 @@ export type SpeechStart = { ok: true } | { ok: false; reason: string };
 
 const KEYBOARD_HINT = "请点输入法键盘上的话筒图标说话，效果一样。";
 
-/** 安卓系统自带的语音识别（不依赖 WebView）。没有识别服务时返回原因，由界面引导用键盘话筒。 */
+/**
+ * 安卓系统自带的语音识别（不依赖 WebView）。说完一句后系统自动结束，结果由 start() 直接返回。
+ * 之前用“边说边出字”模式，部分机型（含华为）不回传中间结果，所以一个字也出不来。
+ */
 export async function startNativeSpeech(onText: (text: string) => void, onStop: () => void): Promise<SpeechStart> {
   try {
     const { available } = await SpeechRecognition.available();
@@ -32,17 +35,22 @@ export async function startNativeSpeech(onText: (text: string) => void, onStop: 
     }
     await clearHandles();
     handles.push(
-      await SpeechRecognition.addListener("partialResults", (data: { matches?: string[] }) => {
-        const spoken = data.matches?.[0];
-        if (spoken) onText(spoken);
-      }),
-    );
-    handles.push(
       await SpeechRecognition.addListener("listeningState", (data: { status: string }) => {
         if (data.status === "stopped") onStop();
       }),
     );
-    await SpeechRecognition.start({ language: "zh-CN", maxResults: 1, partialResults: true, popup: false });
+    // 不等结果，立刻返回“已开始”，结果回来后再填进输入框
+    void SpeechRecognition.start({ language: "zh-CN", maxResults: 3, partialResults: false, popup: false })
+      .then((result: { matches?: string[] }) => {
+        const spoken = result?.matches?.find((item) => item && item.trim());
+        if (spoken) onText(spoken.trim());
+        else onText("");
+      })
+      .catch(() => onText(""))
+      .finally(() => {
+        onStop();
+        void clearHandles();
+      });
     return { ok: true };
   } catch {
     await clearHandles();

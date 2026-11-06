@@ -135,6 +135,10 @@ export function ContractApp() {
       baseRef.current = text.trim();
       const result = await startNativeSpeech(
         (spoken) => {
+          if (!spoken) {
+            setSpeechNote("没听到内容。请靠近一点再说一次，或点输入法键盘上的话筒。");
+            return;
+          }
           const base = baseRef.current;
           setText(base ? `${base} ${spoken}` : spoken);
         },
@@ -321,11 +325,9 @@ export function ContractApp() {
       </header>
 
       <section className="mt-6 rounded-lg border border-line bg-surface p-4 shadow-sm sm:p-5">
-        <label htmlFor="utterance" className="text-sm font-medium text-ink">
-          用嘴说，或打字
-        </label>
         <textarea
           id="utterance"
+          aria-label="合同信息"
           ref={textRef}
           value={text}
           onChange={(event) => setText(event.target.value)}
