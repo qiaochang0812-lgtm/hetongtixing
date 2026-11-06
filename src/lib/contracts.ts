@@ -268,17 +268,53 @@ function findCustomer(text: string): string {
   return "";
 }
 
-function findTitle(text: string): string {
+const COMPANY_RE =
+  /[\u4e00-\u9fffA-Za-z0-9（）()·]{2,30}?(?:有限责任公司|股份有限公司|有限公司|集团|公司|工作室|事务所|合作社|研究院|研究所|医院|学校|银行|工厂|商行|超市|药房|酒店|门店)/;
+const NAME_LEAD = /^(?:今年|去年|刚刚|刚|最近|客户|甲方|乙方|对方|公司名称|名叫|叫做|叫|是|为|和|与|跟|给|同|在)+[:：]?\s*/;
+
+/** 不靠“客户/甲方”这类提示词，直接在句子里找“××公司”。 */
+export function findCompany(text: string): string {
+  const match = text.match(COMPANY_RE);
+  if (!match) return "";
+  let name = match[0];
+  for (let i = 0; i < 4; i += 1) {
+    const next = name.replace(NAME_LEAD, "");
+    if (next === name) break;
+    name = next;
+  }
+  return name.length >= 4 ? name : "";
+}
+
+const TYPE_LEAD = /^(?:和|与|跟|给|同|签订了?|签署了?|签约了?|签了|签|订了|办了|做了|是|为|一份|份|个|的|了|新)+/;
+const DATE_IN_TEXT = /\d{4}\s*[年.\-/]\s*\d{1,2}\s*[月.\-/]\s*\d{1,2}\s*[日号]?|(?:今年|明年|后年|去年)?\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]/g;
+
+/** 找以“合同/协议”结尾的那一段，当作合同类型，如“黑海屿人才协议”。 */
+function kindFromClause(text: string, name: string): string {
+  const body = name ? text.split(name).join(" ") : text;
+  for (const clause of body.split(/[，,。；;、\n]+/)) {
+    const cleaned = clause.replace(DATE_IN_TEXT, " ").trim();
+    const match = cleaned.match(/([\u4e00-\u9fffA-Za-z0-9·]{2,28}?(?:合同书|合同|协议书|协议|合约))/);
+    if (!match) continue;
+    let kind = match[1];
+    for (let i = 0; i < 4; i += 1) {
+      const next = kind.replace(TYPE_LEAD, "");
+      if (next === kind) break;
+      kind = next;
+    }
+    if (kind.length >= 3) return kind;
+  }
+  return "";
+}
+
+function findTitle(text: string, name: string): string {
   const quoted = text.match(/《([^》]{2,40})》/);
   if (quoted) return quoted[1];
-  const named = text.match(/(?:合同名称|合同叫|合同是|这份是|签的是)\s*[:：]?\s*([^，,。；;\s]{2,24})/);
-  if (named) {
-    const title = named[1].replace(/合同$/, "");
-    return title.endsWith("合同") ? title : `${title}`;
-  }
+  const named = text.match(/(?:合同名称|合同类型|合同叫|合同是|这份是|签的是)\s*[:：]?\s*([^，,。；;\s]{2,24})/);
+  if (named) return named[1];
+  const byClause = kindFromClause(text, name);
+  if (byClause) return byClause;
   const kind = text.match(/(年度维保|维保|租赁|采购|服务|销售|劳务|框架|保密|代理|供货|施工)/);
-  if (kind) return `${kind[1]}合同`;
-  return "";
+  return kind ? `${kind[1]}合同` : "";
 }
 
 function findAmount(text: string): string {
@@ -348,7 +384,7 @@ function stripFiller(clause: string): string {
 }
 
 /** 日期、金额、客户、合同名称这些已经识别出来的内容拿掉后，剩下的话原样放进备注。 */
-function buildNotes(raw: string, hits: DateHit[], customer: string): string {
+function buildNotes(raw: string, hits: DateHit[], customer: string, kind = ""): string {
   let rest = raw;
   for (const hit of [...hits].sort((a, b) => b.index - a.index)) {
     rest = `${rest.slice(0, hit.index)} ${rest.slice(hit.index + hit.length)}`;
@@ -367,6 +403,7 @@ function buildNotes(raw: string, hits: DateHit[], customer: string): string {
       .split(customer)
       .join(" ");
   }
+  if (kind) rest = rest.split(kind).join(" ");
   const parts = rest
     .split(/[，,。；;、\s]+/)
     .map(stripFiller)
@@ -379,8 +416,8 @@ export function parseContractText(text: string, today = todayISO()): Draft {
   const draft = emptyDraft(raw);
   if (!raw) return draft;
 
-  const name = findCustomer(raw);
-  const kind = findTitle(raw);
+  const name = findCompany(raw) || findCustomer(raw);
+  const kind = findTitle(raw, name);
   ({ company: draft.customer, type: draft.title } = splitName(name, kind));
   draft.amount = findAmount(raw);
 
@@ -421,6 +458,6 @@ export function parseContractText(text: string, today = todayISO()): Draft {
 
   draft.signedOn = signed;
   draft.expiresOn = expires;
-  draft.notes = buildNotes(raw, hits, name);
+  draft.notes = buildNotes(raw, hits, name, kind);
   return draft;
 }
