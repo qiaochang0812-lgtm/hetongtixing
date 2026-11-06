@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,9 +26,22 @@ jobs:
           else
             SRC=/tmp/src
           fi
+          rm -rf "$SRC/.github" "$SRC/.git"
           cp -a "$SRC"/. .
           test -f package.json || { echo "解压后根目录没有 package.json"; exit 1; }
           test -f capacitor.config.json || { echo "解压后根目录没有 capacitor.config.json"; exit 1; }
+
+      - name: Keep extracted source in the repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "源码没有变化，无需提交"
+          else
+            git commit -m "Extract source from zip"
+            git push
+          fi
 
       - uses: actions/setup-node@v4
         with:
