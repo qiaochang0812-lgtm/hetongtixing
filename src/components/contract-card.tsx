@@ -1,5 +1,5 @@
 import { Check, Pencil, Trash2 } from "lucide-react";
-import { formatCN, phaseOf, reminderLabel, type Contract, type Phase } from "@/lib/contracts";
+import { contractName, formatCN, phaseOf, reminderLabel, type Contract, type Phase } from "@/lib/contracts";
 
 const ACTION = "inline-flex h-10 items-center gap-1 rounded-md border border-line bg-surface px-3 text-sm";
 
@@ -25,8 +25,8 @@ export function ContractCard({
     <article className={`rounded-lg border px-4 py-3 ${tone}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
-          <h3 className="text-base font-semibold text-ink">{row.customer}</h3>
-          <p className="text-sm text-muted">{row.title}</p>
+          <h3 className="text-base font-semibold text-ink">{contractName(row)}</h3>
+          {row.customer && row.title && <p className="text-sm text-muted">{row.title}</p>}
         </div>
         <p className={`max-w-[45%] shrink-0 text-right text-sm font-medium ${badge}`}>{reminderLabel(row, today)}</p>
       </div>

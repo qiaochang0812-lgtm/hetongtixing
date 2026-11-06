@@ -19,28 +19,33 @@ const STAGES: Record<string, [number, number, string]> = {
   "recognizing text": [0.4, 1, "正在识别文字…"],
 };
 
-async function check(path: string, what: string): Promise<boolean> {
+type Found = "ok" | "missing" | "unknown";
+
+/** 只有明确拿到 404 才算“缺文件”；超时、读不了等不确定的情况放行，让引擎自己去试并报真正的错误。 */
+async function check(path: string, needJs = false): Promise<Found> {
   try {
-    const res = await withTimeout(fetch(abs(path)), 10_000, `${what}读取超时`);
+    const res = await withTimeout(fetch(abs(path)), 15_000, "timeout");
     const type = res.headers.get("content-type") ?? "";
     void res.body?.cancel();
-    return res.ok && !type.includes("text/html");
+    if (res.status === 404) return "missing";
+    if (needJs && type.includes("text/html")) return "missing";
+    return res.ok ? "ok" : "unknown";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
-/** 先确认打包进应用的识别组件都在，缺了就直接说缺什么，不让 worker 无声卡死。 */
 async function preflight(): Promise<void> {
-  if (!(await check("tesseract/worker.min.js", "识别引擎"))) {
+  if ((await check("tesseract/worker.min.js", true)) === "missing") {
     throw new Error("应用里缺少识别引擎文件（tesseract/worker.min.js），请重新构建应用。");
   }
-  const core =
-    (await check("tesseract/core/tesseract-core-simd-lstm.wasm.js", "识别核心")) ||
-    (await check("tesseract/core/tesseract-core-lstm.wasm.js", "识别核心"));
-  if (!core) throw new Error("应用里缺少识别核心文件（tesseract/core），请重新构建应用。");
-  if (!(await check("tesseract/lang/chi_sim.traineddata.gz", "中文模型"))) {
-    throw new Error("应用里缺少中文识别模型（tesseract/lang），请重新构建应用。");
+  const [simd, plain] = await Promise.all([
+    check("tesseract/core/tesseract-core-simd-lstm.wasm.js", true),
+    check("tesseract/core/tesseract-core-lstm.wasm.js", true),
+  ]);
+  if (simd === "missing" && plain === "missing") throw new Error("应用里缺少识别核心文件（tesseract/core），请重新构建应用。");
+  if ((await check("tesseract/lang/chi_sim.traineddata")) === "missing") {
+    throw new Error("应用里缺少中文识别模型（tesseract/lang/chi_sim.traineddata），请重新构建应用。");
   }
 }
 
@@ -53,7 +58,7 @@ async function startEngine(): Promise<Worker> {
       langPath: abs("tesseract/lang"),
       workerBlobURL: false,
       cacheMethod: "none",
-      gzip: true,
+      gzip: false,
       logger: (message: { status: string; progress: number }) => {
         const stage = STAGES[message.status];
         if (stage && report) report(stage[0] + (stage[1] - stage[0]) * (message.progress || 0), stage[2]);

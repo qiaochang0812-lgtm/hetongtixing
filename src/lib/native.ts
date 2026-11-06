@@ -2,7 +2,7 @@ import { Capacitor } from "@capacitor/core";
 import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications, type LocalNotificationSchema } from "@capacitor/local-notifications";
 import { Share } from "@capacitor/share";
-import { addMonths, formatCN, todayISO, type Contract } from "@/lib/contracts";
+import { addMonths, contractName, formatCN, todayISO, type Contract } from "@/lib/contracts";
 
 const CHANNEL = "contracts";
 
@@ -63,7 +63,7 @@ export async function syncReminders(rows: Contract[], ask: boolean): Promise<Rem
         list.push({
           id: hashId(`${row.id}:${point.kind}`),
           title: `提醒 · ${point.title}`,
-          body: `${row.customer}的${row.title}，到期日 ${formatCN(row.expiresOn)}`,
+          body: `${contractName(row)}，到期日 ${formatCN(row.expiresOn)}`,
           channelId: CHANNEL,
           schedule: { at: when, allowWhileIdle: true },
         });

@@ -2,7 +2,7 @@
 // 找不到本地模型包时，尝试从 GitHub 下载 tessdata_fast 的简体中文模型。
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 
 const out = "public/tesseract";
 
@@ -28,20 +28,20 @@ async function main() {
   if (lstm.length > 0) cores = lstm;
   for (const name of cores) copyFileSync(join(coreDir, name), join(out, "core", name));
 
-  const target = join(out, "lang", "chi_sim.traineddata.gz");
+  // 用未压缩的 .traineddata：少一步解压（更快），也避开手机内置服务器对 .gz 文件的特殊处理
+  const target = join(out, "lang", "chi_sim.traineddata");
   const files = walk("node_modules/@tesseract.js-data/chi_sim").filter((file) => /chi_sim\.traineddata(\.gz)?$/.test(file));
-  const found =
-    files.find((file) => /fast/.test(file)) ?? files.find((file) => /best_int/.test(file)) ?? files[0];
+  const found = files.find((file) => /fast/.test(file)) ?? files.find((file) => /best_int/.test(file)) ?? files[0];
   if (found) {
-    if (found.endsWith(".gz")) copyFileSync(found, target);
-    else writeFileSync(target, gzipSync(readFileSync(found)));
+    const data = readFileSync(found);
+    writeFileSync(target, found.endsWith(".gz") ? gunzipSync(data) : data);
     console.log("OCR language data from", found);
     return;
   }
   const url = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/chi_sim.traineddata";
   const response = await fetch(url);
   if (!response.ok) throw new Error(`download failed: ${response.status}`);
-  writeFileSync(target, gzipSync(Buffer.from(await response.arrayBuffer())));
+  writeFileSync(target, Buffer.from(await response.arrayBuffer()));
   console.log("OCR language data downloaded from", url);
 }
 

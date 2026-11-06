@@ -2,13 +2,6 @@ import type { ReactNode } from "react";
 import { X } from "lucide-react";
 import type { Draft } from "@/lib/contracts";
 
-export const PERMISSIONS = [
-  { name: "通知", why: "到期前一个月、一周和到期当天弹出提醒。第一次保存合同时会询问。" },
-  { name: "闹钟和提醒（精确定时）", why: "让提醒在早上 9 点准时弹出，而不是被系统延后。" },
-  { name: "开机启动", why: "手机重启后自动恢复已设置的提醒，不然重启后提醒会丢。" },
-  { name: "联网", why: "安卓应用默认声明的权限；本应用不联网上传任何数据，合同文件只在手机本地读取。" },
-];
-
 function Sheet({ title, titleId, onClose, children, footer }: { title: string; titleId: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
   return (
     <div className="fixed inset-0 z-20 flex items-end justify-center bg-ink/40 sm:items-center sm:p-3" role="presentation">
@@ -30,24 +23,6 @@ function Sheet({ title, titleId, onClose, children, footer }: { title: string; t
         {footer && <div className="px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-1 sm:px-5">{footer}</div>}
       </div>
     </div>
-  );
-}
-
-export function PermissionsDialog({ onClose }: { onClose: () => void }) {
-  return (
-    <Sheet title="本应用用到的权限" titleId="perms-title" onClose={onClose}>
-      <ul className="divide-y divide-line text-sm">
-        {PERMISSIONS.map((item) => (
-          <li key={item.name} className="py-3">
-            <p className="font-medium text-ink">{item.name}</p>
-            <p className="mt-1 text-xs leading-5 text-muted">{item.why}</p>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-2 text-xs leading-5 text-muted">
-        不读取通讯录、短信、位置和相册；只在你点「上传合同」时读取你选的那一份文件或图片，也不会上传任何合同数据。
-      </p>
-    </Sheet>
   );
 }
 
@@ -100,8 +75,8 @@ export function DraftDialog({
       }
     >
       <div className="grid gap-3">
-        <Field label="客户" value={draft.customer} onChange={(customer) => onChange({ ...draft, customer })} />
-        <Field label="合同名称" value={draft.title} onChange={(title) => onChange({ ...draft, title })} />
+        <Field label="公司名称" value={draft.customer} onChange={(customer) => onChange({ ...draft, customer })} />
+        <Field label="合同类型" value={draft.title} onChange={(title) => onChange({ ...draft, title })} />
         <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
           <Field label="签订日期" type="date" value={draft.signedOn} onChange={(signedOn) => onChange({ ...draft, signedOn })} />
           <Field label="到期日期" type="date" value={draft.expiresOn} onChange={(expiresOn) => onChange({ ...draft, expiresOn })} />

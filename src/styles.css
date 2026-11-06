@@ -53,3 +53,18 @@
     background: #d7eadf;
   }
 }
+
+.scroll-y {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scroll-y::-webkit-scrollbar {
+  width: 4px;
+}
+
+.scroll-y::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 999px;
+}

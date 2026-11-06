@@ -1,4 +1,5 @@
 import { addMonths, cnSmall, emptyDraft, isISODate, type Draft } from "@/lib/contracts";
+import { splitName } from "@/lib/names";
 
 const CJK = "\\u4e00-\\u9fff";
 
@@ -194,8 +195,7 @@ export function parseContractDocument(rawText: string): DocParse {
   draft.signedOn = signed;
   draft.expiresOn = expires;
   draft.amount = findAmount(text);
-  draft.customer = party(text, "甲");
-  draft.title = findTitle(text) || (draft.customer ? `${draft.customer}合同` : "");
+  ({ company: draft.customer, type: draft.title } = splitName(party(text, "甲"), findTitle(text)));
   draft.notes = keyNotes(text);
 
   const found = [draft.customer, draft.title, draft.signedOn, draft.expiresOn, draft.amount].filter(Boolean).length;

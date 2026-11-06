@@ -1,3 +1,4 @@
+import { splitName } from "@/lib/names";
 export type Contract = {
   id: string;
   customer: string;
@@ -61,6 +62,11 @@ export function dayDiff(fromISO: string, toISO: string): number {
   const a = Date.parse(`${fromISO}T00:00:00Z`);
   const b = Date.parse(`${toISO}T00:00:00Z`);
   return Math.round((b - a) / 86400000);
+}
+
+/** 列表里显示的名称：优先公司名称，没有就用合同类型。 */
+export function contractName(row: { customer: string; title: string }): string {
+  return row.customer.trim() || row.title.trim() || "未命名合同";
 }
 
 export type Phase = "active" | "due" | "expired";
@@ -262,7 +268,7 @@ function findCustomer(text: string): string {
   return "";
 }
 
-function findTitle(text: string, customer: string): string {
+function findTitle(text: string): string {
   const quoted = text.match(/《([^》]{2,40})》/);
   if (quoted) return quoted[1];
   const named = text.match(/(?:合同名称|合同叫|合同是|这份是|签的是)\s*[:：]?\s*([^，,。；;\s]{2,24})/);
@@ -272,7 +278,6 @@ function findTitle(text: string, customer: string): string {
   }
   const kind = text.match(/(年度维保|维保|租赁|采购|服务|销售|劳务|框架|保密|代理|供货|施工)/);
   if (kind) return `${kind[1]}合同`;
-  if (customer) return `${customer}合同`;
   return "";
 }
 
@@ -374,8 +379,9 @@ export function parseContractText(text: string, today = todayISO()): Draft {
   const draft = emptyDraft(raw);
   if (!raw) return draft;
 
-  draft.customer = findCustomer(raw);
-  draft.title = findTitle(raw, draft.customer);
+  const name = findCustomer(raw);
+  const kind = findTitle(raw);
+  ({ company: draft.customer, type: draft.title } = splitName(name, kind));
   draft.amount = findAmount(raw);
 
   const hits = findDates(raw, today);
@@ -415,7 +421,6 @@ export function parseContractText(text: string, today = todayISO()): Draft {
 
   draft.signedOn = signed;
   draft.expiresOn = expires;
-  if (!draft.title && draft.customer) draft.title = `${draft.customer}合同`;
-  draft.notes = buildNotes(raw, hits, draft.customer);
+  draft.notes = buildNotes(raw, hits, name);
   return draft;
 }
