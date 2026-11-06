@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC",
+    "Microsoft YaHei", sans-serif;
+  --font-serif: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "STSong", "SimSun", serif;
+
+  --color-bg: #f3efe6;
+  --color-surface: #fffcf6;
+  --color-ink: #1c1915;
+  --color-muted: #6d655b;
+  --color-line: #e3d9c8;
+  --color-primary: #1e4d3a;
+  --color-primary-fg: #f6f3ea;
+  --color-warn: #9a3412;
+  --color-warn-bg: #fde8d4;
+  --color-danger: #9f1239;
+  --color-danger-bg: #fde4ea;
+  --color-ok: #166534;
+  --color-ok-bg: #e5f3e8;
+  --color-chip: #ebe4d6;
+
+  --radius-lg: 1.25rem;
+  --radius-md: 0.875rem;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html {
+    background: var(--color-bg);
+    color: var(--color-ink);
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(1200px 480px at 50% -10%, #efe6d4 0%, transparent 70%),
+      var(--color-bg);
+  }
+
+  ::selection {
+    background: #d7eadf;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .listen-ring {
+    animation: none !important;
+  }
+}
+
+@keyframes listen {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+
+.listen-ring {
+  animation: listen 1.4s ease-out infinite;
+}

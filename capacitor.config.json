@@ -1,0 +1,6 @@
+{
+  "appId": "com.qiaochang.qiqi",
+  "appName": "提醒",
+  "webDir": "dist",
+  "android": { "allowMixedContent": false }
+}
